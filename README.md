@@ -46,7 +46,8 @@ tool, `agent/tools.py` decides what that means, and a service does the work.
 1. New application → **Docker Compose**, pointed at this repo.
 2. Paste `.env.example` into the Environment tab. Set `WC_API_TOKEN`
    (`openssl rand -hex 24`). `WC_DATABASE_URL` and `WC_OLLAMA_URL` are set by compose.
-3. Deploy.
+3. Deploy. (`scripts/generate-env.sh` fills the blank secrets in `.env.example`
+   locally if you want them generated for you.)
 4. Migrate and pull the model:
    ```
    docker compose run --rm api alembic upgrade head
