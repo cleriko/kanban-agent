@@ -24,7 +24,7 @@ RUN apt-get update \
 
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install ".[whisper]"
+RUN pip install ".[whisper,gemini]"
 
 COPY alembic.ini ./
 COPY migrations ./migrations
