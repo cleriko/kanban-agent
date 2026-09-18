@@ -14,7 +14,7 @@ from .ai.gateway import get_gateway
 from .api import agent, jobs, meetings, tasks
 from .api.schemas import HealthDTO
 from .config import get_settings
-from .db.session import create_all, dispose, session_scope
+from .db.session import create_all, dispose, run_migrations, session_scope
 from .infrastructure import logging as log_config
 
 VERSION = "1.0.0"
@@ -29,6 +29,14 @@ async def lifespan(app: FastAPI):
     if settings.is_sqlite:
         # Convenience for local runs and tests; Postgres uses Alembic.
         await create_all()
+    elif settings.run_migrations:
+        try:
+            await run_migrations()
+            log.info("migrations applied")
+        except Exception as exc:  # noqa: BLE001
+            # Do not take the process down: /health will report the database as
+            # unreachable, which is the accurate signal.
+            log.error("could not apply migrations: %s", exc)
 
     log.info("work console API %s up · db=%s · storage=%s · stt=%s · llm=%s · auth=%s",
              VERSION, _host_of(settings.database_url), settings.storage_backend,

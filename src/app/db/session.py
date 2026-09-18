@@ -55,6 +55,32 @@ async def create_all() -> None:
         await connection.run_sync(Base.metadata.create_all)
 
 
+async def run_migrations() -> None:
+    """Applies Alembic migrations in-process.
+
+    Used when WC_RUN_MIGRATIONS is set, so a single-container deployment does not
+    need a separate `alembic upgrade head` step. Alembic is synchronous, so it
+    runs in a thread to keep the event loop free.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    root = Path(__file__).resolve().parents[3]
+    ini = root / "alembic.ini"
+    if not ini.exists():
+        raise FileNotFoundError(f"alembic.ini not found at {ini}")
+
+    def upgrade() -> None:
+        config = Config(str(ini))
+        config.set_main_option("script_location", str(root / "migrations"))
+        command.upgrade(config, "head")
+
+    await asyncio.to_thread(upgrade)
+
+
 async def dispose() -> None:
     global _engine, _factory
     if _engine is not None:

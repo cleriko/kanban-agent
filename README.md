@@ -62,7 +62,7 @@ Dockerfile one. It is four services, and the compose file creates them all.
 4. Migrate and pull the model:
    ```
    docker compose run --rm api alembic upgrade head
-   docker compose exec ollama ollama pull llama3.1:8b
+   docker compose exec ollama ollama pull qwen2.5:0.5b
    ```
 5. Attach a domain to the **api** service on port **8080** (the only port the
    stack exposes; Postgres and Ollama stay on the internal network). Dokploy adds the Traefik
@@ -79,7 +79,7 @@ internal network and are not reachable from outside. Persistent data lives in
 cp .env.example .env      # set WC_API_TOKEN
 docker compose up -d postgres ollama
 docker compose run --rm api alembic upgrade head
-docker compose exec ollama ollama pull llama3.1:8b
+docker compose exec ollama ollama pull qwen2.5:0.5b
 docker compose up -d
 ```
 
@@ -150,8 +150,9 @@ is in use.
 | `gemini` | **opt-in.** Sends transcripts to Google. Logs a warning on startup. |
 | `fake` | deterministic, for tests and bring-up |
 
-Whisper sizes: `tiny.en` → `large-v3`. `base.en` is a reasonable starting point on CPU;
-move to `small.en` or a GPU if accuracy matters more than speed.
+Defaults are small on purpose: `tiny.en` (~75 MB) and `qwen2.5:0.5b` (~400 MB), so the
+whole stack runs in about 2 GB. Summaries and action items hold up at that size; the
+agent does not. DEPLOY.md has the size/quality ladder and what each step buys.
 
 ## Tests
 

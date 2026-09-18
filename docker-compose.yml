@@ -11,7 +11,7 @@
 #   3. Deploy, then run migrations:
 #        docker compose run --rm api alembic upgrade head
 #   4. Pull the model:
-#        docker compose exec ollama ollama pull llama3.1:8b
+#        docker compose exec ollama ollama pull qwen2.5:0.5b
 #   5. Attach a domain to `api` → port 8080.
 # ---------------------------------------------------------------------------
 services:
@@ -59,8 +59,7 @@ services:
   api:
     build:
       context: .
-      args:
-        EXTRAS: whisper
+      target: api
     restart: unless-stopped
     env_file:
       # Optional: Dokploy writes this from its Environment tab. Without it the
@@ -87,10 +86,8 @@ services:
   worker:
     build:
       context: .
-      args:
-        EXTRAS: whisper
+      target: worker
     restart: unless-stopped
-    command: ["python", "-m", "app.workers.runner"]
     env_file:
       # Optional: Dokploy writes this from its Environment tab. Without it the
       # values below still apply, so a bare checkout still comes up.
@@ -113,8 +110,8 @@ services:
     deploy:
       resources:
         limits:
-          # A base.en model plus an 8B LLM client fits comfortably; raise for large-v3.
-          memory: 6G
+          # tiny.en needs well under 1G. Raise this if you move to a larger model.
+          memory: 2G
 
 networks:
   # Created by Dokploy on the host. Only the API joins it.

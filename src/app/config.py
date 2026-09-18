@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="WC_", extra="ignore")
 
     # --- API ---------------------------------------------------------------
+    # Run `alembic upgrade head` on API startup. Off by default because a
+    # multi-replica deployment should migrate as a separate step, but it removes
+    # the one manual command when the API is a single container.
+    run_migrations: bool = False
+
     host: str = "0.0.0.0"
     port: int = 8080
     log_level: str = "info"
@@ -50,7 +55,10 @@ class Settings(BaseSettings):
 
     # --- Transcription -----------------------------------------------------
     transcription_provider: Literal["faster_whisper", "fake"] = "faster_whisper"
-    whisper_model: str = "base.en"
+    # tiny.en is ~75 MB as int8 and transcribes clear speech well enough for notes
+    # and action items. Move up to base.en / small.en if accents, crosstalk or poor
+    # microphones start costing you words.
+    whisper_model: str = "tiny.en"
     whisper_device: str = "auto"
     whisper_compute_type: str = "int8"
     whisper_language: str = "en"
@@ -62,10 +70,14 @@ class Settings(BaseSettings):
     # Google — it exists so the provider can be swapped, and is never the default.
     llm_provider: Literal["ollama", "gemini", "fake"] = "ollama"
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1:8b"
+    # ~400 MB at Q4. Small enough for a modest VPS, and schema-constrained decoding
+    # keeps its JSON valid. Quality of the *content* scales with size — see DEPLOY.md.
+    ollama_model: str = "qwen2.5:0.5b"
     llm_temperature: float = 0.1
     llm_timeout: float = 300.0
-    llm_num_ctx: int = 8192
+    # Small models are the ones that actually run out of context. 4k keeps memory
+    # down; raise it alongside the model.
+    llm_num_ctx: int = 4096
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
 
@@ -77,8 +89,9 @@ class Settings(BaseSettings):
     agent_action_ttl_seconds: int = 900
 
     # --- Analysis ----------------------------------------------------------
-    # Long transcripts are summarised in chunks before the final pass.
-    analysis_chunk_chars: int = 12_000
+    # Long transcripts are summarised in chunks before the final pass. Sized to sit
+    # comfortably inside llm_num_ctx with the prompt: ~6k chars is ~1.5k tokens.
+    analysis_chunk_chars: int = 6_000
 
     @property
     def auth_enabled(self) -> bool:
