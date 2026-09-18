@@ -3,9 +3,10 @@
 The brain. Everything heavy runs here: transcription, analysis, agent reasoning,
 storage and the job queue. The macOS client (`kanban-mac`) is a thin renderer.
 
-By default **nothing leaves this machine**. Speech-to-text is faster-whisper running
-locally; reasoning is a local LLM over Ollama. A cloud provider exists behind a config
-flag and is never selected implicitly.
+Transcription runs **locally** on faster-whisper, so meeting audio never leaves the
+machine. Analysis and the agent use the **Gemini API**, so there is no model server to
+host — only the transcript is sent to Google. Both halves are swappable: run the LLM
+locally on Ollama, or push transcription to Gemini as well. See DEPLOY.md.
 
 ## Shape
 
@@ -59,13 +60,10 @@ Dockerfile one. It is four services, and the compose file creates them all.
    is refused and `/health` returns 503. The startup log says so explicitly.
 3. Deploy. (`scripts/generate-env.sh` fills the blank secrets in `.env.example`
    locally if you want them generated for you.)
-4. Migrate and pull the model:
-   ```
-   docker compose run --rm api alembic upgrade head
-   docker compose exec ollama ollama pull qwen2.5:0.5b
-   ```
-5. Attach a domain to the **api** service on port **8080** (the only port the
-   stack exposes; Postgres and Ollama stay on the internal network). Dokploy adds the Traefik
+4. Set `WC_GEMINI_API_KEY`, and `WC_RUN_MIGRATIONS=true` so the schema is applied
+   on boot (or run `docker compose run --rm api alembic upgrade head` yourself).
+5. Attach a domain to the **api** service on port **8080** — the only port the
+   stack exposes; Postgres stays on the internal network. Dokploy adds the Traefik
    labels and the certificate.
 6. In the Mac app: Settings → VPS → that URL, plus the same `WC_API_TOKEN`.
 
@@ -77,9 +75,8 @@ internal network and are not reachable from outside. Persistent data lives in
 
 ```
 cp .env.example .env      # set WC_API_TOKEN
-docker compose up -d postgres ollama
+docker compose up -d postgres
 docker compose run --rm api alembic upgrade head
-docker compose exec ollama ollama pull qwen2.5:0.5b
 docker compose up -d
 ```
 
@@ -145,14 +142,13 @@ is in use.
 
 | | |
 |---|---|
-| `faster_whisper` | local speech-to-text (default) |
-| `ollama` | local LLM (default) |
-| `gemini` | **opt-in.** Sends transcripts to Google. Logs a warning on startup. |
+| `faster_whisper` | local speech-to-text **(default)** |
+| `ollama` | local LLM, for a fully self-hosted stack |
+| `gemini` | LLM **(default)**, and optionally speech-to-text. Sends data to Google; logs what, on startup. |
 | `fake` | deterministic, for tests and bring-up |
 
-Defaults are small on purpose: `tiny.en` (~75 MB) and `qwen2.5:0.5b` (~400 MB), so the
-whole stack runs in about 2 GB. Summaries and action items hold up at that size; the
-agent does not. DEPLOY.md has the size/quality ladder and what each step buys.
+The only thing hosted is Whisper (`base.en`, ~145 MB), so the whole stack runs in about
+1 GB. DEPLOY.md covers the sizes and the fully-local alternative.
 
 ## Tests
 

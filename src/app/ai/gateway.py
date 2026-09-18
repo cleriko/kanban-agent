@@ -41,6 +41,15 @@ class AIGateway:
             log.warning("using the fake transcription provider; no real speech recognition")
             return FakeTranscriptionProvider()
 
+        if choice == "gemini":
+            from .providers.gemini_stt import GeminiTranscriptionProvider
+            log.warning("transcription provider is gemini: meeting audio will be sent to Google")
+            return GeminiTranscriptionProvider(
+                api_key=self._settings.gemini_api_key,
+                model=self._settings.gemini_model,
+                timeout=self._settings.gemini_timeout,
+            )
+
         from .providers.whisper_local import FasterWhisperProvider
         return FasterWhisperProvider(
             model_size=self._settings.whisper_model,

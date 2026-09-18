@@ -52,8 +52,15 @@ async def lifespan(app: FastAPI):
     if not settings.auth_enabled:
         log.warning("WC_API_TOKEN is empty: the API is unauthenticated. Only acceptable "
                     "behind a private tunnel.")
-    if settings.llm_provider == "gemini":
-        log.warning("LLM provider is gemini: transcripts will be sent to Google")
+    if settings.uses_gemini:
+        sent = []
+        if settings.transcription_provider == "gemini":
+            sent.append("meeting audio")
+        if settings.llm_provider == "gemini":
+            sent.append("transcripts and task data")
+        log.warning("gemini is enabled: %s will be sent to Google", " and ".join(sent))
+        if not settings.gemini_api_key:
+            log.error("WC_GEMINI_API_KEY is empty; every request to Gemini will fail.")
     yield
     await dispose()
 

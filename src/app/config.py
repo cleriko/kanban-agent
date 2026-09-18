@@ -54,11 +54,14 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 1800
 
     # --- Transcription -----------------------------------------------------
-    transcription_provider: Literal["faster_whisper", "fake"] = "faster_whisper"
-    # tiny.en is ~75 MB as int8 and transcribes clear speech well enough for notes
-    # and action items. Move up to base.en / small.en if accents, crosstalk or poor
-    # microphones start costing you words.
-    whisper_model: str = "tiny.en"
+    # "gemini" sends audio to Google and needs no local model, ffmpeg or weights.
+    # "faster_whisper" keeps everything on this machine.
+    transcription_provider: Literal["faster_whisper", "gemini", "fake"] = "faster_whisper"
+    # ~145 MB as int8. With the LLM on Gemini there is no local model competing for
+    # RAM, so this is the right place to spend: a word the transcript missed cannot
+    # be recovered by a smarter summariser. Drop to tiny.en on a very small box, or
+    # move to small.en if accents and crosstalk are costing you words.
+    whisper_model: str = "base.en"
     whisper_device: str = "auto"
     whisper_compute_type: str = "int8"
     whisper_language: str = "en"
@@ -66,9 +69,12 @@ class Settings(BaseSettings):
     whisper_vad_filter: bool = True
 
     # --- LLM ---------------------------------------------------------------
-    # "ollama" runs a model on the VPS. "gemini" is opt-in and sends transcripts to
-    # Google — it exists so the provider can be swapped, and is never the default.
-    llm_provider: Literal["ollama", "gemini", "fake"] = "ollama"
+    # Gemini by default: the analysis and agent work benefits most from a capable
+    # model, and running an 8B model locally is what pushes the VPS requirement from
+    # 512 MB to 8 GB. Transcription stays local (see transcription_provider), so the
+    # audio itself never leaves this machine — only the transcript does.
+    # Set this to "ollama" for a fully local stack.
+    llm_provider: Literal["ollama", "gemini", "fake"] = "gemini"
     ollama_url: str = "http://localhost:11434"
     # ~400 MB at Q4. Small enough for a modest VPS, and schema-constrained decoding
     # keeps its JSON valid. Quality of the *content* scales with size — see DEPLOY.md.
@@ -80,6 +86,16 @@ class Settings(BaseSettings):
     llm_num_ctx: int = 4096
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    # Audio uploads and long transcripts are slow; this covers both.
+    gemini_timeout: float = 900.0
+
+    @property
+    def uses_gemini(self) -> bool:
+        return "gemini" in (self.llm_provider, self.transcription_provider)
+
+    @property
+    def needs_ollama(self) -> bool:
+        return self.llm_provider == "ollama"
 
     # --- Agent -------------------------------------------------------------
     agent_max_iterations: int = 6

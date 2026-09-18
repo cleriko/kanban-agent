@@ -8,9 +8,15 @@ Two supported shapes. Pick one.
 - **[One compose application](#b-one-compose-application)** — Build Type: Compose.
   One entry, everything defined in `docker-compose.yml`.
 
-Whichever you choose, the stack is always four things: **api**, **worker**,
-**postgres**, **ollama**. The API on its own cannot work — it has no database and
-no model server. If you see this in the log, only the API is running:
+The default stack is three things: **api**, **worker**, **postgres**. The LLM is
+Gemini, so there is no model server to run. Transcription stays local, so the
+meeting audio never leaves your machine — only the transcript is sent to Google.
+
+(Add an **ollama** service only if you want a fully local LLM too. It is behind
+the `local-llm` compose profile and is not started by default.)
+
+The API on its own cannot work — it has no database. If you see this in the log,
+only the API is running:
 
 ```
 work console API 1.0.0 up · db=localhost:5432 · ...
@@ -39,19 +45,13 @@ of the split.
 Dokploy → Create → **Database** → PostgreSQL. Note the internal host, user,
 password and database name.
 
-### 2. Ollama
+### 2. Gemini key
 
-Dokploy → Create → **Application** → Docker image `ollama/ollama:latest`.
+Get an API key from Google AI Studio. Nothing to deploy — this replaces the model
+server entirely.
 
-- No domain. Nothing outside should reach it.
-- Mount a volume on `/root/.ollama` or the model is re-downloaded on every deploy.
-- 2 GB is enough for the default 0.5B model.
-
-Once it is up, pull a model from its terminal:
-
-```
-ollama pull qwen2.5:0.5b
-```
+If you would rather run the LLM locally, skip this and see
+[Fully local](#fully-local) at the bottom.
 
 ### 3. The API
 
@@ -68,9 +68,10 @@ compose would otherwise have set for you:
 
 ```
 WC_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@POSTGRES_HOST:5432/DBNAME
-WC_OLLAMA_URL=http://OLLAMA_HOST:11434
 WC_STORAGE_PATH=/var/lib/workconsole/objects
 WC_RUN_MIGRATIONS=true
+WC_LLM_PROVIDER=gemini
+WC_GEMINI_API_KEY=your-key
 ```
 
 `+asyncpg` is required. Dokploy will hand you a `postgresql://` URL; a plain one
@@ -122,11 +123,10 @@ Environment: paste `.env.example` and fill in `WC_API_TOKEN` and
 `POSTGRES_PASSWORD`. Do **not** set `WC_DATABASE_URL`, `WC_OLLAMA_URL` or
 `WC_STORAGE_PATH` — compose sets those to the internal service names.
 
-Then:
+Then apply migrations (or set `WC_RUN_MIGRATIONS=true` and skip this):
 
 ```
 docker compose run --rm api alembic upgrade head
-docker compose exec ollama ollama pull qwen2.5:0.5b
 ```
 
 Attach the domain to the **api** service on port **8080**.
@@ -140,54 +140,70 @@ Settings → VPS → Server URL = `https://your-domain`, API key = your
 
 ## Models and footprint
 
-The defaults are deliberately small — about **475 MB of weights** total:
-
-| | model | on disk | RAM in use |
+| | runs | model | size |
 |---|---|---|---|
-| speech-to-text | `tiny.en` | ~75 MB | ~400 MB while transcribing |
-| LLM | `qwen2.5:0.5b` | ~400 MB | ~1 GB loaded |
+| speech-to-text | **on your VPS** | `base.en` | ~145 MB |
+| LLM | **Gemini API** | `gemini-2.5-flash` | nothing to host |
 
-With Postgres (~256 MB) and the API (~256 MB) the whole stack sits around
-**2 GB**, so a 4 GB VPS is comfortable and 2 GB is survivable.
+Nothing else to install. Whole stack:
 
-### What you give up
+| | |
+|---|---|
+| postgres | ~256 MB |
+| api | ~256 MB |
+| worker | ~600 MB while transcribing, near zero idle |
 
-Be clear-eyed about this. A 0.5B model is small.
+**Around 1 GB.** A 2 GB VPS is fine. The 8 GB figure only applied when an 8B model
+was running locally.
 
-- **Summaries and action items**: usable. The JSON schema is enforced during
-  decoding, so the shape is always valid, and pulling commitments out of a
-  transcript is a narrow task. Expect blunter summaries and the occasional missed
-  action item.
-- **The agent**: weak. Choosing a tool and composing arguments is exactly what
-  small models are bad at. If you want the agent to be genuinely useful, this is
-  the part that needs a bigger model.
-- **`tiny.en`**: fine for clear speech on a decent microphone. Accents, crosstalk
-  and laptop mics across a room will cost you words, and a worse transcript makes
-  everything downstream worse.
+### Where your data goes
 
-### Scaling up
+- **Meeting audio** — never leaves the VPS. Whisper transcribes it locally, and the
+  file is deleted once results are stored.
+- **Transcripts, task titles, meeting notes** — sent to Google as part of analysis
+  and agent requests.
 
-Change two variables and pull the model. Nothing else moves.
+If that split is not acceptable, see [Fully local](#fully-local).
 
-| Budget | `WC_WHISPER_MODEL` | `WC_OLLAMA_MODEL` | Weights | Notes |
-|---|---|---|---|---|
-| ~475 MB | `tiny.en` | `qwen2.5:0.5b` | ~475 MB | the default |
-| ~1 GB | `tiny.en` | `llama3.2:1b` | ~885 MB | noticeably better prose |
-| ~2 GB | `base.en` | `qwen2.5:1.5b` | ~1.2 GB | good balance |
-| ~4 GB | `small.en` | `qwen2.5:3b` | ~2.5 GB | agent starts being useful |
-| 8 GB+ | `small.en` | `llama3.1:8b` | ~5.3 GB | best without a GPU |
+### Whisper sizes
 
-Raise `WC_LLM_NUM_CTX` with the model (4096 → 8192) and
-`WC_ANALYSIS_CHUNK_CHARS` with it (6000 → 12000), or long meetings get condensed
-in more passes than they need.
+| model | size | when |
+|---|---|---|
+| `tiny.en` | ~75 MB | a very small box, clear speech only |
+| `base.en` | ~145 MB | **the default** |
+| `small.en` | ~480 MB | accents, crosstalk, poor microphones |
+| `medium.en` | ~1.5 GB | diminishing returns without a GPU |
 
-With a GPU: `WC_WHISPER_DEVICE=cuda` and `WC_WHISPER_COMPUTE_TYPE=float16`.
+With a GPU: `WC_WHISPER_DEVICE=cuda`, `WC_WHISPER_COMPUTE_TYPE=float16`.
 
-### A middle path
+### Fully local
 
-Transcription quality matters more than LLM size for getting action items right —
-a missed sentence cannot be recovered by a smarter summariser. If you only have
-room to spend once, spend it on `base.en` before a bigger LLM.
+No Google at all. Costs memory:
+
+```
+WC_LLM_PROVIDER=ollama
+WC_OLLAMA_URL=http://OLLAMA_HOST:11434
+WC_OLLAMA_MODEL=qwen2.5:0.5b     # ~400 MB, weak agent
+WC_LLM_NUM_CTX=4096
+WC_ANALYSIS_CHUNK_CHARS=6000
+```
+
+Compose: `docker compose --profile local-llm up -d`, then
+`docker compose exec ollama ollama pull qwen2.5:0.5b`. Separate applications: add
+an Ollama application from the `ollama/ollama:latest` image, no domain.
+
+Model sizes: `qwen2.5:0.5b` ~400 MB, `llama3.2:1b` ~810 MB, `qwen2.5:3b` ~1.9 GB,
+`llama3.1:8b` ~4.7 GB. Summaries hold up from 0.5B because decoding is
+schema-constrained; the agent needs 3B+ to be useful.
+
+### Transcribing with Gemini too
+
+Removes Whisper entirely — no weights, no ffmpeg, ~512 MB total — but uploads the
+meeting audio to Google:
+
+```
+WC_TRANSCRIPTION_PROVIDER=gemini
+```
 
 ## Troubleshooting
 
@@ -200,8 +216,11 @@ starting, or the URL is missing `+asyncpg`.
 is a separate process and never appears in the API's logs. The usual causes are
 the model not being pulled, or the object-storage volume not being shared.
 
-**`model 'qwen2.5:0.5b' is not available`** — run `ollama pull` in the Ollama
-container.
+**`WC_GEMINI_API_KEY is empty`** — the API logs this at startup; every analysis
+and agent request will fail until it is set.
+
+**`model '...' is not available`** — only applies to the local-LLM path; run
+`ollama pull` in the Ollama container.
 
 **Worker logs `FileNotFoundError` on an audio key** — the API and worker are not
 sharing `/var/lib/workconsole/objects`.

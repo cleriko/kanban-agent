@@ -10,9 +10,7 @@
 #   2. Paste .env.example into Dokploy's Environment tab and fill in WC_API_TOKEN.
 #   3. Deploy, then run migrations:
 #        docker compose run --rm api alembic upgrade head
-#   4. Pull the model:
-#        docker compose exec ollama ollama pull qwen2.5:0.5b
-#   5. Attach a domain to `api` → port 8080.
+#   4. Attach a domain to `api` → port 8080.
 # ---------------------------------------------------------------------------
 services:
   postgres:
@@ -33,8 +31,10 @@ services:
     networks:
       - internal
 
-  # Local LLM. Never exposed outside the compose network.
+  # Only needed for WC_LLM_PROVIDER=ollama. Not started by default:
+  #   docker compose --profile local-llm up -d
   ollama:
+    profiles: ["local-llm"]
     image: ollama/ollama:latest
     restart: unless-stopped
     volumes:
