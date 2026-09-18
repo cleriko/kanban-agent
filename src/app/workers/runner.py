@@ -15,6 +15,14 @@ from ..infrastructure.queue import JobQueue
 from ..infrastructure.storage import get_storage
 from .meeting_worker import MeetingProcessor
 
+
+def _host_of(url: str) -> str:
+    """Host:port from a SQLAlchemy URL, with the password stripped."""
+    try:
+        return url.split("://", 1)[1].split("/", 1)[0].rsplit("@", 1)[-1] or "?"
+    except (IndexError, AttributeError):
+        return "?"
+
 log = logging.getLogger("worker")
 
 
@@ -40,8 +48,19 @@ class Worker:
         if self._settings.is_sqlite:
             await create_all()
 
-        log.info("worker %s ready · stt=%s · llm=%s",
-                 self._id, self._settings.transcription_provider, self._settings.llm_provider)
+        log.info("worker %s ready · db=%s · stt=%s · llm=%s",
+                 self._id, _host_of(self._settings.database_url),
+                 self._settings.transcription_provider, self._settings.llm_provider)
+
+        present = sorted(k for k in os.environ if k.startswith("WC_"))
+        if present:
+            log.info("WC_* variables present: %s", ", ".join(present))
+        else:
+            log.error("No WC_* environment variables are set in this container. The "
+                      "environment is not reaching the process.")
+        if _host_of(self._settings.database_url).startswith(("localhost", "127.0.0.1")):
+            log.error("WC_DATABASE_URL is not set; the worker cannot reach the queue and "
+                      "will never pick up a job.")
 
         try:
             while not self._stopping.is_set():

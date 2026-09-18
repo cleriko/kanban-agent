@@ -71,6 +71,37 @@ analysis.
 
 ---
 
+## "None of my environment variables are set"
+
+If the startup log shows `db=localhost:5432` **and** `WC_API_TOKEN is empty`
+**and** `WC_GEMINI_API_KEY is empty` all at once, none of them are reaching the
+container. That is one problem, not three. The log now says so directly:
+
+```
+ERROR  No WC_* environment variables are set in this container.
+```
+
+In order of likelihood:
+
+1. **You saved the environment but did not redeploy.** Dokploy bakes the
+   environment in at deploy time; editing it does nothing to a running container.
+   Hit **Redeploy** after saving.
+2. **It went into the wrong box.** Dokploy has a separate *Build-time variables*
+   section. These are runtime settings — they belong in **Environment**.
+3. **It is on the wrong service.** Each Application has its own environment. The
+   API and the worker each need their own copy.
+4. **Blank lines or quotes.** Use `WC_API_TOKEN=abc`, not `WC_API_TOKEN="abc"`
+   and not `export WC_API_TOKEN=abc`.
+
+To confirm from inside, open the service's terminal in Dokploy:
+
+```
+env | grep WC_
+```
+
+Nothing printed means the environment never arrived, and no amount of changing
+the values will help until that is fixed.
+
 ## The three things that break this
 
 **1. The driver prefix.** Dokploy hands you `postgresql://…`. It must be

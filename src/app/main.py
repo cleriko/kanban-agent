@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from pathlib import Path
@@ -42,6 +43,17 @@ async def lifespan(app: FastAPI):
              VERSION, _host_of(settings.database_url), settings.storage_backend,
              settings.transcription_provider, settings.llm_provider,
              "on" if settings.auth_enabled else "OFF")
+
+    # Names only, never values. When every setting looks unset, the question is
+    # whether the environment reached the container at all — and this answers it
+    # without anyone having to shell in.
+    present = sorted(k for k in os.environ if k.startswith("WC_"))
+    if present:
+        log.info("WC_* variables present: %s", ", ".join(present))
+    else:
+        log.error("No WC_* environment variables are set in this container. The "
+                  "environment is not reaching the process — check that it is saved "
+                  "against THIS service and that you redeployed after saving.")
 
     # Fail loudly at boot rather than leaving someone to work it out from a
     # SQLAlchemy traceback on the first health probe.
