@@ -1,0 +1,28 @@
+# /etc/systemd/system/workconsole-worker.service
+[Unit]
+Description=Work Console processing worker (transcription + analysis)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=workconsole
+Group=workconsole
+WorkingDirectory=/opt/workconsole
+EnvironmentFile=/opt/workconsole/.env
+Environment=PYTHONPATH=/opt/workconsole/src
+ExecStart=/opt/workconsole/.venv/bin/python -m app.workers.runner
+Restart=always
+RestartSec=5
+# A model load is slow; give it time to shut down cleanly.
+TimeoutStopSec=120
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/workconsole
+MemoryMax=8G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,80 @@
+{
+  "clientVersion" : "1.0",
+  "context" : {
+    "active" : 1,
+    "agenda" : [
+      {
+        "actionItemId" : "44444444-4444-4444-4444-444444444444",
+        "created" : "2026-09-18T05:07:54.592Z",
+        "due" : "2026-09-18T17:00:00.000Z",
+        "dueToday" : true,
+        "id" : "55555555-5555-5555-5555-555555555555",
+        "meetingId" : "33333333-3333-3333-3333-333333333333",
+        "notes" : "ship the agent bridge",
+        "overdue" : false,
+        "position" : 0,
+        "priority" : "urgent",
+        "source" : "meeting",
+        "status" : "in_progress",
+        "subtasks" : [
+          {
+            "done" : false,
+            "id" : "1C967312-681E-45B7-8DB1-D9CA0AA23FCC",
+            "title" : "build image"
+          },
+          {
+            "done" : false,
+            "id" : "303E8E92-EF1C-4D5F-986F-14D6D197A80F",
+            "title" : "run migrations"
+          }
+        ],
+        "tags" : [
+          "ops"
+        ],
+        "title" : "Deploy API",
+        "updated" : "2026-09-18T05:07:54.592Z"
+      },
+      {
+        "created" : "2026-09-18T05:07:54.593Z",
+        "dueToday" : false,
+        "id" : "2330D000-60AC-4AC7-BF0E-15B15696EBCD",
+        "notes" : "",
+        "overdue" : false,
+        "position" : 0,
+        "priority" : "high",
+        "source" : "manual",
+        "status" : "todo",
+        "subtasks" : [
+
+        ],
+        "tags" : [
+
+        ],
+        "title" : "Finish CAD model",
+        "updated" : "2026-09-18T05:07:54.593Z"
+      }
+    ],
+    "byStatus" : {
+      "done" : 0,
+      "in_progress" : 1,
+      "inbox" : 0,
+      "todo" : 1
+    },
+    "doneToday" : 0,
+    "dueToday" : 1,
+    "generatedAt" : "2026-09-18T05:07:54.594Z",
+    "open" : 2,
+    "overdue" : 0
+  },
+  "history" : [
+    {
+      "content" : "hi",
+      "role" : "user"
+    },
+    {
+      "content" : "Hello.",
+      "role" : "assistant"
+    }
+  ],
+  "message" : "move my API task into progress"
+}

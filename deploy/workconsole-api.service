@@ -1,0 +1,26 @@
+# /etc/systemd/system/workconsole-api.service
+# Non-Docker deployment. Assumes a checkout at /opt/workconsole with a venv.
+[Unit]
+Description=Work Console API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=workconsole
+Group=workconsole
+WorkingDirectory=/opt/workconsole
+EnvironmentFile=/opt/workconsole/.env
+Environment=PYTHONPATH=/opt/workconsole/src
+ExecStart=/opt/workconsole/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080 --workers 1
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/workconsole
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# TLS in front of the API. Caddy obtains and renews the certificate itself.
+#
+# The macOS app's "Server URL" is then https://console.example.com
+console.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		# Meeting uploads are large and processing streams are long-lived.
+		transport http {
+			read_timeout 1h
+			write_timeout 1h
+		}
+		# Do not buffer server-sent events.
+		flush_interval -1
+	}
+	request_body {
+		max_size 512MB
+	}
+}
