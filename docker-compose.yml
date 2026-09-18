@@ -63,7 +63,10 @@ services:
         EXTRAS: whisper
     restart: unless-stopped
     env_file:
-      - .env
+      # Optional: Dokploy writes this from its Environment tab. Without it the
+      # values below still apply, so a bare checkout still comes up.
+      - path: .env
+        required: false
     environment:
       WC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-workconsole}:${POSTGRES_PASSWORD:-workconsole}@postgres:5432/${POSTGRES_DB:-workconsole}
       WC_OLLAMA_URL: http://ollama:11434
@@ -89,7 +92,10 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "app.workers.runner"]
     env_file:
-      - .env
+      # Optional: Dokploy writes this from its Environment tab. Without it the
+      # values below still apply, so a bare checkout still comes up.
+      - path: .env
+        required: false
     environment:
       WC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-workconsole}:${POSTGRES_PASSWORD:-workconsole}@postgres:5432/${POSTGRES_DB:-workconsole}
       WC_OLLAMA_URL: http://ollama:11434

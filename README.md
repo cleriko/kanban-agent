@@ -43,6 +43,10 @@ tool, `agent/tools.py` decides what that means, and a service does the work.
 
 ### Dokploy (what this is deployed with)
 
+Full walkthrough in [DEPLOY.md](DEPLOY.md). The short version — and the one thing
+people get wrong — is that this must be a **Compose** application, not a
+Dockerfile one. It is four services, and the compose file creates them all.
+
 1. New application → **Docker Compose**, pointed at this repo.
 2. Paste `.env.example` into the Environment tab and **fill in the blanks** —
    `WC_API_TOKEN` and `POSTGRES_PASSWORD`. Nothing sets these for you;
