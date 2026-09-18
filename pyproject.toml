@@ -1,7 +1,7 @@
 [project]
-name = "workconsole-backend"
+name = "workconsole-agent"
 version = "1.0.0"
-description = "Self-hosted API, job queue and local AI workers for the macOS work console"
+description = "Transcription and meeting-analysis worker for the macOS work console"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -13,14 +13,13 @@ dependencies = [
     "asyncpg>=0.30",
     "aiosqlite>=0.20",
     "httpx>=0.28",
-    "python-multipart>=0.0.20",
+    "faster-whisper>=1.1.0",
     "langchain-core>=0.3.29",
     "langgraph>=0.2.60",
 ]
 
 [project.optional-dependencies]
-# Installed on the VPS, where the models actually run.
-whisper = ["faster-whisper>=1.1.0"]
+whisper = []   # kept so `pip install ".[whisper]"` still works
 # Optional cloud provider. Off unless explicitly selected; nothing uses it by default.
 gemini = ["langchain-google-genai>=2.0.8"]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "httpx>=0.28"]

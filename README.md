@@ -1,165 +1,100 @@
-# Work Console — backend
+# kanban-agent — transcription and analysis worker
 
-The brain. Everything heavy runs here: transcription, analysis, agent reasoning,
-storage and the job queue. The macOS client (`kanban-mac`) is a thin renderer.
+The processing half of the macOS work console. One of two deployable services:
 
-Transcription runs **locally** on faster-whisper, so meeting audio never leaves the
-machine. Analysis and the agent use the **Gemini API**, so there is no model server to
-host — only the transcript is sent to Google. Both halves are swappable: run the LLM
-locally on Ollama, or push transcription to Gemini as well. See DEPLOY.md.
+| repo | service | Dokploy |
+|---|---|---|
+| [kanban-worker](https://github.com/cleriko/kanban-worker) | API | domain → port 8080 |
+| **kanban-agent** (this one) | transcription + analysis | **no domain** |
 
-## Shape
-
-```
-macOS app ──HTTPS──► API (FastAPI)
-                      ├── Postgres          tasks, meetings, jobs, agent actions
-                      ├── Object storage    audio + nothing else
-                      └── Job queue ──► Worker
-                                          ├── faster-whisper   audio → transcript
-                                          └── local LLM        transcript → notes,
-                                                               decisions, action items
-```
-
-Two process types, one image: `api` serves requests, `worker` drains the queue. They
-share nothing but Postgres and the object store, so the worker can be moved to a GPU
-box later without touching the API.
-
-## Layout
+It serves no HTTP. It claims jobs from Postgres, reads the recording from the
+object store the API wrote it to, transcribes it locally with Whisper, sends the
+*transcript* to the LLM for analysis, and writes the results back.
 
 ```
-src/app/
-├── api/              routes + wire schemas (the contract with the Mac app)
-├── services/         the only code that touches the database
-├── workers/          queue runner + the meeting pipeline
-├── agent/            LangGraph loop, tools, prompts
-├── ai/               provider interfaces (whisper / ollama / gemini / fake) + gateway
-├── db/               SQLAlchemy models and session handling
-└── infrastructure/   queue, object storage, SSE, logging
+audio (object store) ──► faster-whisper ──► transcript ──► LLM ──► summary
+                            (local)                      (Gemini)   decisions
+                                                                    action items
 ```
 
-The rule the layout enforces: **the agent never touches the database.** It names a
-tool, `agent/tools.py` decides what that means, and a service does the work.
+Meeting audio never leaves the machine. Only the transcript is sent to Google.
 
-## Running it
+## Deploy on Dokploy
 
-### Dokploy (what this is deployed with)
+Create → Application → this repo, Build Type **Dockerfile**. No Build Stage
+needed; this repo builds the worker and nothing else.
 
-Full walkthrough in [DEPLOY.md](DEPLOY.md). The short version — and the one thing
-people get wrong — is that this must be a **Compose** application, not a
-Dockerfile one. It is four services, and the compose file creates them all.
+- **No domain, no port.** Giving it one means a healthcheck that can never pass.
+- Volumes:
+  - `/var/lib/workconsole/objects` → `/var/lib/workconsole/objects`
+    — **the same host path the API uses**
+  - `/var/lib/workconsole/models` → `/var/lib/workconsole/models`
+    — Whisper weights, so they survive a redeploy
 
-1. New application → **Docker Compose**, pointed at this repo.
-2. Paste `.env.example` into the Environment tab and **fill in the blanks** —
-   `WC_API_TOKEN` and `POSTGRES_PASSWORD`. Nothing sets these for you;
-   `scripts/generate-env.sh` will generate them locally if you want.
-   `WC_DATABASE_URL`, `WC_OLLAMA_URL` and `WC_STORAGE_PATH` are set by compose,
-   so leave those out.
+Environment — the same as the API, except `WC_RUN_MIGRATIONS=false`:
 
-   If `WC_DATABASE_URL` is somehow not set, the built-in default points at
-   `localhost` — which inside a container is the container itself, so Postgres
-   is refused and `/health` returns 503. The startup log says so explicitly.
-3. Deploy. (`scripts/generate-env.sh` fills the blank secrets in `.env.example`
-   locally if you want them generated for you.)
-4. Set `WC_GEMINI_API_KEY`, and `WC_RUN_MIGRATIONS=true` so the schema is applied
-   on boot (or run `docker compose run --rm api alembic upgrade head` yourself).
-5. Attach a domain to the **api** service on port **8080** — the only port the
-   stack exposes; Postgres stays on the internal network. Dokploy adds the Traefik
-   labels and the certificate.
-6. In the Mac app: Settings → VPS → that URL, plus the same `WC_API_TOKEN`.
-
-Only `api` joins `dokploy-network`; Postgres, Ollama and the worker stay on the
-internal network and are not reachable from outside. Persistent data lives in
-`../files/` on the host, which is where Dokploy keeps Compose bind mounts.
-
-### Plain Docker
-
-```
-cp .env.example .env      # set WC_API_TOKEN
-docker compose up -d postgres
-docker compose run --rm api alembic upgrade head
-docker compose up -d
+```env
+WC_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@PG_HOST:5432/DBNAME
+WC_API_TOKEN=same-token-as-the-api
+WC_GEMINI_API_KEY=your-google-ai-studio-key
+WC_LLM_PROVIDER=gemini
+WC_GEMINI_MODEL=gemini-2.5-flash
+WC_TRANSCRIPTION_PROVIDER=faster_whisper
+WC_WHISPER_MODEL=base.en
+WC_WHISPER_COMPUTE_TYPE=int8
+WC_WHISPER_LANGUAGE=en
+WC_STORAGE_BACKEND=local
+WC_STORAGE_PATH=/var/lib/workconsole/objects
+WC_RUN_MIGRATIONS=false
+WC_LOG_LEVEL=info
 ```
 
-### Without Docker
+> **The shared volume is not optional.** The API writes the uploaded audio and
+> this service reads it. Different host paths means every job fails with a
+> missing file, while both containers look perfectly healthy.
+
+## Verifying
+
+There is no endpoint. Read the log — on boot it prints:
 
 ```
-python -m venv .venv && .venv/bin/pip install '.[whisper,dev]'
-export WC_DATABASE_URL=postgresql+asyncpg://...
-.venv/bin/alembic upgrade head
-.venv/bin/uvicorn app.main:app --port 8080     # API
-.venv/bin/python -m app.workers.runner          # worker, separate process
+worker <host>:<pid> ready · db=<host>:5432 · stt=faster_whisper · llm=gemini
+WC_* variables present: WC_API_TOKEN, WC_DATABASE_URL, ...
 ```
 
-`deploy/` has systemd units and a Caddyfile for this path.
-
-## API
-
-Versioned under `/api/v1`.
-
-| | |
-|---|---|
-| `GET /health` | unauthenticated, so a tunnel can be probed. **503** when Postgres is unreachable |
-| `GET/POST /tasks`, `GET/PATCH/DELETE /tasks/{id}` | task CRUD |
-| `POST /tasks/{id}/move`, `/complete`, `/reopen` | explicit transitions |
-| `GET /summary` | counts + agenda |
-| `GET/POST /meetings`, `GET/DELETE /meetings/{id}` | meeting records |
-| `PUT /meetings/{id}/audio` | streams the recording into object storage |
-| `POST /meetings/{id}/process` | **returns a job**, does not block |
-| `GET /meetings/{id}/transcript`, `/action-items` | results |
-| `GET /jobs/{id}`, `GET /jobs/{id}/events` | polling, and SSE progress |
-| `POST /agent/chat` | one agent turn |
-| `POST /agent/actions/{id}/execute` | runs one confirmed operation |
-| `GET /agent/actions` | pending, or `?history=true` for the audit trail |
-
-Everything except `/health` needs `Authorization: Bearer $WC_API_TOKEN`.
-
-Interactive docs at `/api/docs`.
-
-## How the agent is kept on a leash
-
-A read tool runs immediately — the model needs the result to reason.
-
-A **write** does not. It is validated, rendered as a one-line summary, and stored in
-`agent_actions` with a snapshot of the row it would change. The client shows it and the
-user presses EXECUTE, which calls `/agent/actions/{id}/execute`. That is the only path
-by which an agent write reaches the database.
-
-Two consequences worth knowing:
-
-- The task id is resolved **when the action is proposed**, not when it runs. You confirm
-  the task you were shown, even if a better title match appears in between.
-- `undo_state` already holds the pre-change row, so undo is a feature to add, not a
-  schema change.
-
-Meeting action items are a harder line: the agent has no tool that creates tasks from
-them. `suggest_tasks` returns proposals and says to review them in the app.
-
-## Swapping models
-
-`WC_TRANSCRIPTION_PROVIDER` and `WC_LLM_PROVIDER` select an implementation of
-`TranscriptionProvider` / `LLMProvider`. Nothing outside `ai/providers/` knows which one
-is in use.
-
-| | |
-|---|---|
-| `faster_whisper` | local speech-to-text **(default)** |
-| `ollama` | local LLM, for a fully self-hosted stack |
-| `gemini` | LLM **(default)**, and optionally speech-to-text. Sends data to Google; logs what, on startup. |
-| `fake` | deterministic, for tests and bring-up |
-
-The only thing hosted is Whisper (`base.en`, ~145 MB), so the whole stack runs in about
-1 GB. DEPLOY.md covers the sizes and the fully-local alternative.
-
-## Tests
+`db=localhost:5432` means `WC_DATABASE_URL` did not reach the container, and it
+will never pick up a job. Processing a meeting then logs each stage:
 
 ```
-.venv/bin/pytest
+meeting <id> transcribed: 42 segments
+meeting <id> analysed: 3 action item(s)
 ```
 
-50 tests, no Postgres and no models required — they run on SQLite with the `fake`
-providers, and exercise the real job queue and the real worker pipeline.
+## Whisper sizes
 
-`tests/test_contract.py` asserts against JSON generated by the macOS client's own
-encoder (`tests/fixtures/`, copied over by `scripts/sync-contract-fixtures.sh` in the
-client repo). If either side's types drift, those tests fail rather than the app
-silently sending a field the server ignores.
+| model | size | when |
+|---|---|---|
+| `tiny.en` | ~75 MB | a very small box, clear speech only |
+| `base.en` | ~145 MB | **the default** |
+| `small.en` | ~480 MB | accents, crosstalk, poor microphones |
+
+Allow ~600 MB while transcribing; near zero idle. With a GPU set
+`WC_WHISPER_DEVICE=cuda` and `WC_WHISPER_COMPUTE_TYPE=float16`.
+
+For a fully local stack, set `WC_LLM_PROVIDER=ollama` and `WC_OLLAMA_URL`, and
+run Ollama as its own service. Summaries hold up from a 0.5B model because
+decoding is schema-constrained; the agent needs 3B+ to be useful.
+
+## Jobs
+
+The queue is a Postgres table, claimed with `FOR UPDATE SKIP LOCKED`. Reusing the
+row that already has to exist — the client polls it, the UI renders it — removes
+a whole broker from the deployment.
+
+A job whose worker dies is reclaimed once its lease expires
+(`WC_JOB_LEASE_SECONDS`, default 30 min), so a killed container never strands
+work. Model and network failures are retried up to `WC_JOB_MAX_ATTEMPTS`; bad
+data is not retried.
+
+A failure during analysis keeps the transcript. The useful half of the work is
+not thrown away because the second half failed.
