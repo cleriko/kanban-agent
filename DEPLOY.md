@@ -1,22 +1,84 @@
 # Deploying on Dokploy
 
-Two supported shapes. Pick one.
+## The three services
 
-- **[Separate applications](#a-separate-applications)** — Build Type: Dockerfile, with
-  a Build Stage. Four Dokploy entries. Fits Dokploy's model, gives each piece its own
-  logs, resources and restart behaviour.
-- **[One compose application](#b-one-compose-application)** — Build Type: Compose.
-  One entry, everything defined in `docker-compose.yml`.
+| # | Dokploy type | Build Stage | Domain |
+|---|---|---|---|
+| 1 | Database → PostgreSQL | — | none |
+| 2 | Application → this repo | `api` | yes, → port **8080** |
+| 3 | Application → this repo | `worker` | **none** |
 
-The default stack is three things: **api**, **worker**, **postgres**. The LLM is
-Gemini, so there is no model server to run. Transcription stays local, so the
-meeting audio never leaves your machine — only the transcript is sent to Google.
+Same repo deployed twice. The `Dockerfile` is multi-stage; the **Build Stage**
+field picks which process you get. There is no Ollama — the LLM is the Gemini API.
 
-(Add an **ollama** service only if you want a fully local LLM too. It is behind
-the `local-llm` compose profile and is not started by default.)
+---
 
-The API on its own cannot work — it has no database. If you see this in the log,
-only the API is running:
+## 1. Postgres
+
+Dokploy → Create → **Database** → PostgreSQL. Any user/password/database name.
+
+When it is running, open it and copy the **internal** host — something like
+`workconsole-db-a1b2c3`. That is what the other two services connect to. It is
+*not* `localhost`, and it is not the external host.
+
+## 2. API
+
+Create → **Application** → this repo, branch `main`.
+
+- Build Type: **Dockerfile**
+- Build Stage: **`api`**
+- Domain: your hostname → port **8080**
+- Volume: `/var/lib/workconsole/objects` → `/var/lib/workconsole/objects`
+
+Environment:
+
+```env
+WC_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@PG_HOST:5432/DBNAME
+WC_API_TOKEN=generate-with-openssl-rand-hex-24
+WC_GEMINI_API_KEY=your-google-ai-studio-key
+WC_LLM_PROVIDER=gemini
+WC_GEMINI_MODEL=gemini-2.5-flash
+WC_TRANSCRIPTION_PROVIDER=faster_whisper
+WC_WHISPER_MODEL=base.en
+WC_WHISPER_COMPUTE_TYPE=int8
+WC_STORAGE_BACKEND=local
+WC_STORAGE_PATH=/var/lib/workconsole/objects
+WC_RUN_MIGRATIONS=true
+WC_LOG_LEVEL=info
+```
+
+## 3. Worker
+
+Create a **second Application** from the same repo.
+
+- Build Stage: **`worker`**
+- **No domain and no port.** It serves no HTTP; a domain would healthcheck
+  forever and never pass.
+- Volumes:
+  - `/var/lib/workconsole/objects` → `/var/lib/workconsole/objects`
+    — **the same host path as the API**
+  - `/var/lib/workconsole/models` → `/var/lib/workconsole/models`
+    — Whisper weights, so they survive redeploys
+
+Environment: identical to the API, except:
+
+```env
+WC_RUN_MIGRATIONS=false
+```
+
+Both need `WC_GEMINI_API_KEY`: the API runs the agent, the worker runs meeting
+analysis.
+
+---
+
+## The three things that break this
+
+**1. The driver prefix.** Dokploy hands you `postgresql://…`. It must be
+`postgresql+asyncpg://…` — the driver is async and a plain URL fails at startup.
+
+**2. The host.** `WC_DATABASE_URL` must point at Postgres's *internal* Dokploy
+host. If the startup log says `db=localhost:5432`, the variable is not set and
+the API is talking to itself:
 
 ```
 work console API 1.0.0 up · db=localhost:5432 · ...
@@ -24,119 +86,40 @@ ERROR  WC_DATABASE_URL is not set. Falling back to localhost ...
 GET /health 503 Service Unavailable
 ```
 
+**3. The shared volume.** The API writes the uploaded audio; the worker reads it.
+If they are not on the same host path, every job fails with a missing file. (To
+avoid sharing a filesystem, use `WC_STORAGE_BACKEND=s3` instead.)
+
 ---
 
-## A. Separate applications
-
-The `Dockerfile` is multi-stage. The **Build Stage** field selects which process
-you get:
-
-| Build Stage | What runs |
-|---|---|
-| `api` | the HTTP API, port 8080 |
-| `worker` | transcription + analysis, no port |
-| *(empty)* | builds the last stage, which is `api` |
-
-The API image does not include faster-whisper; the worker does. That is the point
-of the split.
-
-### 1. Postgres
-
-Dokploy → Create → **Database** → PostgreSQL. Note the internal host, user,
-password and database name.
-
-### 2. Gemini key
-
-Get an API key from Google AI Studio. Nothing to deploy — this replaces the model
-server entirely.
-
-If you would rather run the LLM locally, skip this and see
-[Fully local](#fully-local) at the bottom.
-
-### 3. The API
-
-Dokploy → Create → **Application** → this repo, branch `main`.
-
-- Build Type: **Dockerfile**
-- Build Stage: **`api`**
-- Domain: your hostname → port **8080**
-- Volume: host path `/var/lib/workconsole/objects` → container
-  `/var/lib/workconsole/objects`
-
-Environment — paste `.env.example` and fill in the blanks, plus these three which
-compose would otherwise have set for you:
-
-```
-WC_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@POSTGRES_HOST:5432/DBNAME
-WC_STORAGE_PATH=/var/lib/workconsole/objects
-WC_RUN_MIGRATIONS=true
-WC_LLM_PROVIDER=gemini
-WC_GEMINI_API_KEY=your-key
-```
-
-`+asyncpg` is required. Dokploy will hand you a `postgresql://` URL; a plain one
-fails at startup because the driver is async.
-
-`WC_RUN_MIGRATIONS=true` applies migrations when the API boots, so there is no
-separate step.
-
-### 4. The worker
-
-Create a **second Application** from the same repo.
-
-- Build Stage: **`worker`**
-- **No domain, no port.** It serves no HTTP; giving it a domain will just fail a
-  healthcheck forever.
-- Volumes: the **same** `/var/lib/workconsole/objects` host path as the API, plus
-  `/var/lib/workconsole/models` for the Whisper weights.
-- Environment: the same values as the API, except `WC_RUN_MIGRATIONS=false`.
-
-> **The shared volume is not optional.** The API writes the uploaded audio and the
-> worker reads it. Different volumes means every job fails with a missing file.
-> If you would rather not share a filesystem, switch both to S3
-> (`WC_STORAGE_BACKEND=s3` and the `WC_S3_*` settings) and drop the volume.
-
-### 5. Check
+## Checking it worked
 
 ```
 curl https://your-domain/health
 ```
 
-`200` with `"database": true` means the API and Postgres are talking. A `503`
-carries a `detail` field saying what is wrong.
+`200` with `"database": true`. A `503` carries a `detail` field saying why.
 
-The worker has no endpoint — look at its logs. On boot it prints:
+The API log should read `db=<your-pg-host>:5432`.
+
+The worker has no endpoint — read its log. On boot:
 
 ```
-worker <host>:<pid> ready · stt=faster_whisper · llm=ollama
+worker <host>:<pid> ready · stt=faster_whisper · llm=gemini
 ```
+
+Then point the Mac app at it: Settings → VPS → Server URL `https://your-domain`,
+API key = your `WC_API_TOKEN`.
 
 ---
 
-## B. One compose application
+## Alternative: one compose application
 
-Dokploy → Create → **Compose**, this repo, branch `main`, compose path
-`docker-compose.yml`. It defines all four services, the shared volume and the
-internal network.
-
-Environment: paste `.env.example` and fill in `WC_API_TOKEN` and
-`POSTGRES_PASSWORD`. Do **not** set `WC_DATABASE_URL`, `WC_OLLAMA_URL` or
-`WC_STORAGE_PATH` — compose sets those to the internal service names.
-
-Then apply migrations (or set `WC_RUN_MIGRATIONS=true` and skip this):
-
-```
-docker compose run --rm api alembic upgrade head
-```
-
-Attach the domain to the **api** service on port **8080**.
-
----
-
-## Connecting the Mac app
-
-Settings → VPS → Server URL = `https://your-domain`, API key = your
-`WC_API_TOKEN`. Press CONNECT.
+If you would rather run it as a single Dokploy **Compose** application, the repo's
+`docker-compose.yml` defines everything and sets the database URL and volumes for
+you. Paste `.env.example` into the Environment tab, set `WC_API_TOKEN`,
+`POSTGRES_PASSWORD` and `WC_GEMINI_API_KEY`, and attach the domain to the `api`
+service on port 8080.
 
 ## Models and footprint
 
