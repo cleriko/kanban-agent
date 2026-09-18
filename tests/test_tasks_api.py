@@ -145,3 +145,54 @@ async def test_auth_is_enforced_when_a_token_is_set(client, api, monkeypatch):
     assert (await client.get(f"{api}/tasks", headers={"Authorization": "Bearer nope"})).status_code == 401
     ok = await client.get(f"{api}/tasks", headers={"Authorization": "Bearer secret"})
     assert ok.status_code == 200
+
+
+# --- Health honesty ---------------------------------------------------------
+
+
+async def test_health_reports_503_when_the_database_is_unreachable(client, api, monkeypatch):
+    """A container healthcheck probes this. Returning 200 while Postgres is down
+    would mark the service healthy when nothing works — which is what happened on
+    the first deploy."""
+    from contextlib import asynccontextmanager
+
+    from app import main as main_module
+
+    @asynccontextmanager
+    async def broken_session():
+        raise ConnectionRefusedError(111, "Connection refused")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main_module, "session_scope", broken_session)
+    monkeypatch.setattr(main_module, "_health_failures", 0)
+
+    response = await client.get(f"{api}/health")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["database"] is False
+    assert body["detail"], "the failure must say what to check"
+    assert "Postgres" in body["detail"]
+
+
+async def test_health_hint_names_the_unset_variable_in_a_container(monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setattr(main_module, "_in_container", lambda: True)
+    hint = main_module._connection_hint(
+        "postgresql+asyncpg://user:secret@localhost:5432/db", ConnectionRefusedError())
+
+    assert "WC_DATABASE_URL is unset" in hint
+    assert "secret" not in hint, "the password must never reach the log or the response"
+
+
+async def test_health_hint_is_plain_for_a_real_remote_host(monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setattr(main_module, "_in_container", lambda: True)
+    hint = main_module._connection_hint(
+        "postgresql+asyncpg://user:secret@postgres:5432/db", ConnectionRefusedError())
+
+    assert "postgres:5432" in hint
+    assert "WC_DATABASE_URL is unset" not in hint
+    assert "secret" not in hint

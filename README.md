@@ -44,8 +44,15 @@ tool, `agent/tools.py` decides what that means, and a service does the work.
 ### Dokploy (what this is deployed with)
 
 1. New application → **Docker Compose**, pointed at this repo.
-2. Paste `.env.example` into the Environment tab. Set `WC_API_TOKEN`
-   (`openssl rand -hex 24`). `WC_DATABASE_URL` and `WC_OLLAMA_URL` are set by compose.
+2. Paste `.env.example` into the Environment tab and **fill in the blanks** —
+   `WC_API_TOKEN` and `POSTGRES_PASSWORD`. Nothing sets these for you;
+   `scripts/generate-env.sh` will generate them locally if you want.
+   `WC_DATABASE_URL`, `WC_OLLAMA_URL` and `WC_STORAGE_PATH` are set by compose,
+   so leave those out.
+
+   If `WC_DATABASE_URL` is somehow not set, the built-in default points at
+   `localhost` — which inside a container is the container itself, so Postgres
+   is refused and `/health` returns 503. The startup log says so explicitly.
 3. Deploy. (`scripts/generate-env.sh` fills the blank secrets in `.env.example`
    locally if you want them generated for you.)
 4. Migrate and pull the model:
@@ -53,7 +60,8 @@ tool, `agent/tools.py` decides what that means, and a service does the work.
    docker compose run --rm api alembic upgrade head
    docker compose exec ollama ollama pull llama3.1:8b
    ```
-5. Attach a domain to the **api** service on port **8080**. Dokploy adds the Traefik
+5. Attach a domain to the **api** service on port **8080** (the only port the
+   stack exposes; Postgres and Ollama stay on the internal network). Dokploy adds the Traefik
    labels and the certificate.
 6. In the Mac app: Settings → VPS → that URL, plus the same `WC_API_TOKEN`.
 
@@ -89,7 +97,7 @@ Versioned under `/api/v1`.
 
 | | |
 |---|---|
-| `GET /health` | unauthenticated, so a tunnel can be probed |
+| `GET /health` | unauthenticated, so a tunnel can be probed. **503** when Postgres is unreachable |
 | `GET/POST /tasks`, `GET/PATCH/DELETE /tasks/{id}` | task CRUD |
 | `POST /tasks/{id}/move`, `/complete`, `/reopen` | explicit transitions |
 | `GET /summary` | counts + agenda |

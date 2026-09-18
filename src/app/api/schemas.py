@@ -213,6 +213,8 @@ class HealthDTO(BaseModel):
     storage: str
     transcription: str
     llm: str
+    # Present only when something is wrong, with a hint at the likely cause.
+    detail: str | None = None
 
 
 class ErrorBody(BaseModel):
