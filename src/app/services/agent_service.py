@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent.graph import build_graph, system_message
@@ -117,15 +117,26 @@ class AgentService:
         if tool == "delete_task":
             return f"DELETE · {task.title}", snapshot
         if tool == "update_task":
-            fields = [k for k in ("title", "notes", "priority", "due", "tags")
-                      if arguments.get(k) is not None]
-            return f"UPDATE {', '.join(fields).upper() or 'TASK'} · {task.title}", snapshot
+            changes = [
+                f"{key.upper()}={_brief(arguments.get(key))}"
+                for key in ("title", "notes", "priority", "due", "tags")
+                if arguments.get(key) is not None
+            ]
+            # Show the values, not just the field names: a prompt-injected write must
+            # not be confirmable from a summary that hides what it will change.
+            return f"UPDATE · {task.title}\n" + ", ".join(changes), snapshot
         return f"{tool.replace('_', ' ').upper()} · {task.title}", snapshot
 
     # --- Execution --------------------------------------------------------
 
     async def execute(self, action_id: str) -> AgentChatResponse:
-        action = await self._session.get(AgentAction, action_id)
+        # Lock the row for the whole check-then-execute. Postgres serialises two
+        # concurrent EXECUTE taps here; SQLite (tests) cannot, so it claims with a
+        # conditional UPDATE instead. Either way the write lands once.
+        statement = select(AgentAction).where(AgentAction.id == action_id)
+        if not self._settings.is_sqlite:
+            statement = statement.with_for_update()
+        action = (await self._session.execute(statement)).scalar_one_or_none()
         if action is None:
             raise NotFound(f"no agent action with id {action_id}")
         if action.executed:
@@ -135,11 +146,29 @@ class AgentService:
         if age > timedelta(seconds=self._settings.agent_action_ttl_seconds):
             raise Conflict("this action has expired; ask the agent again")
 
+        claimed_early = False
+        if self._settings.is_sqlite:
+            claimed = await self._session.execute(
+                update(AgentAction)
+                .where(AgentAction.id == action_id, AgentAction.executed.is_(False))
+                .values(executed=True, executed_at=utcnow())
+            )
+            if claimed.rowcount == 0:
+                raise Conflict("this action has already been executed")
+            claimed_early = True
+            action.executed = True
+            action.executed_at = utcnow()
+
         try:
             outcome = await self._executor.execute(action.tool, action.arguments)
         except Exception as exc:  # noqa: BLE001
+            if claimed_early:
+                action.executed = False
+                action.executed_at = None
             action.error = str(exc)[:2000]
-            await self._session.flush()
+            # Commit the failed attempt: get_session rolls back on the re-raised
+            # exception, which would erase the audit record and leave no trace.
+            await self._session.commit()
             raise
 
         action.executed = True
@@ -184,3 +213,9 @@ def _final_text(messages: list[Any]) -> str:
 
 def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _brief(value: Any, limit: int = 160) -> str:
+    """One-line rendering of a proposed value, so a confirmation shows the payload."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"

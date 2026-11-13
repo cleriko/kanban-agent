@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -41,7 +42,14 @@ async def poll_stream(
     since_keepalive = 0.0
 
     while elapsed < timeout:
-        current = await fetch()
+        try:
+            current = await fetch()
+        except Exception as exc:  # noqa: BLE001
+            # A database blip must end the stream with an event the client can act
+            # on, not a silently truncated response.
+            logging.getLogger(__name__).warning("event stream fetch failed: %s", exc)
+            yield format_event({"error": "unavailable"}, event="error")
+            return
         if current is None:
             yield format_event({"error": "not_found"}, event="error")
             return

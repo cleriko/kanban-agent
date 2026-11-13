@@ -1,121 +1,29 @@
 # ---------------------------------------------------------------------------
-# Dokploy deployment (Application type: Docker Compose).
+# Optional local/alternative deployment for the worker-only repository.
 #
-# Dokploy handles TLS and routing through Traefik, so nothing here publishes a
-# host port — attach a domain to the `api` service on port 8080 in the Dokploy UI
-# and it wires up the labels for you.
+# The documented path is a Dokploy **Application** built from this repo's
+# Dockerfile with no domain (see README). This compose file is for running the
+# same image outside Dokploy: it expects the same Postgres and the same object
+# directory the API uses.
 #
-# Setup, once:
-#   1. Create a Compose application pointing at this repo.
-#   2. Paste .env.example into Dokploy's Environment tab and fill in WC_API_TOKEN.
-#   3. Deploy, then run migrations:
-#        docker compose run --rm api alembic upgrade head
-#   4. Attach a domain to `api` → port 8080.
+#   WC_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:5432/DB
+#   WC_GEMINI_API_KEY=...
+#   docker compose up -d --build
 # ---------------------------------------------------------------------------
 services:
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-workconsole}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workconsole}
-      POSTGRES_DB: ${POSTGRES_DB:-workconsole}
-    volumes:
-      # Dokploy keeps bind mounts for a Compose app under ../files on the host.
-      - ../files/postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-workconsole}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - internal
-
-  # Only needed for WC_LLM_PROVIDER=ollama. Not started by default:
-  #   docker compose --profile local-llm up -d
-  ollama:
-    profiles: ["local-llm"]
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    volumes:
-      - ../files/ollama:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    networks:
-      - internal
-    # On a GPU host, uncomment:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-
-  api:
-    build:
-      context: .
-      target: api
-    restart: unless-stopped
-    env_file:
-      # Optional: Dokploy writes this from its Environment tab. Without it the
-      # values below still apply, so a bare checkout still comes up.
-      - path: .env
-        required: false
-    environment:
-      WC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-workconsole}:${POSTGRES_PASSWORD:-workconsole}@postgres:5432/${POSTGRES_DB:-workconsole}
-      WC_OLLAMA_URL: http://ollama:11434
-      WC_STORAGE_PATH: /var/lib/workconsole/objects
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ../files/objects:/var/lib/workconsole/objects
-    expose:
-      - "8080"
-    networks:
-      # Traefik lives here; this is what lets Dokploy route a domain to the service.
-      - dokploy-network
-      - internal
-
-  # Separate process so transcription never competes with request handling.
   worker:
-    build:
-      context: .
-      target: worker
+    build: .
     restart: unless-stopped
+    # Finishing a transcription takes minutes; do not kill it on shutdown.
+    stop_grace_period: 2m
     env_file:
-      # Optional: Dokploy writes this from its Environment tab. Without it the
-      # values below still apply, so a bare checkout still comes up.
       - path: .env
         required: false
     environment:
-      WC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-workconsole}:${POSTGRES_PASSWORD:-workconsole}@postgres:5432/${POSTGRES_DB:-workconsole}
-      WC_OLLAMA_URL: http://ollama:11434
+      # Must be the same host path as the API's mount, or every job fails with a
+      # missing file while both containers look healthy.
       WC_STORAGE_PATH: /var/lib/workconsole/objects
-    depends_on:
-      postgres:
-        condition: service_healthy
+      WC_RUN_MIGRATIONS: "false"
     volumes:
-      # Same object store as the API: the worker reads the audio straight off disk.
-      - ../files/objects:/var/lib/workconsole/objects
-      # Whisper weights, downloaded once and kept across deploys.
-      - ../files/models:/var/lib/workconsole/models
-    networks:
-      - internal
-    deploy:
-      resources:
-        limits:
-          # tiny.en needs well under 1G. Raise this if you move to a larger model.
-          memory: 2G
-
-networks:
-  # Created by Dokploy on the host. Only the API joins it.
-  dokploy-network:
-    external: true
-  internal:
-    driver: bridge
+      - /var/lib/workconsole/objects:/var/lib/workconsole/objects
+      - /var/lib/workconsole/models:/var/lib/workconsole/models

@@ -26,9 +26,16 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     log_level: str = "info"
-    # Bearer token the macOS app sends. Empty disables auth — only acceptable
-    # behind a tunnel on a trusted network.
+    # Bearer token the macOS app sends. Empty is refused at request time unless
+    # allow_unauthenticated is set, so a missing environment variable cannot expose
+    # the board and the paid model endpoint by accident.
     api_token: str = ""
+    # Explicit opt-out for a machine reachable only over a private tunnel or for the
+    # test suite. Never set this on a host with a public domain.
+    allow_unauthenticated: bool = False
+    # Off by default: the schema is a map of the API for anyone who can reach the
+    # host. Set WC_ENABLE_DOCS=1 on a private deployment when you want /api/docs.
+    enable_docs: bool = False
     cors_origins: list[str] = []
 
     # --- Database ----------------------------------------------------------
@@ -51,7 +58,12 @@ class Settings(BaseSettings):
     job_claim_batch: int = 1
     job_max_attempts: int = 3
     # A job claimed by a worker that then died is released after this long.
-    job_lease_seconds: int = 1800
+    # Must exceed job_timeout_seconds so a live job is never reclaimed; progress
+    # reports also refresh it.
+    job_lease_seconds: int = 3900
+    # Hard ceiling for one meeting job. A hung model call must not pin the worker
+    # forever; on expiry the job is cancelled and requeued until attempts run out.
+    job_timeout_seconds: int = 3600
 
     # --- Transcription -----------------------------------------------------
     # "gemini" sends audio to Google and needs no local model, ffmpeg or weights.
@@ -99,8 +111,8 @@ class Settings(BaseSettings):
 
     # --- Agent -------------------------------------------------------------
     agent_max_iterations: int = 6
-    # Destructive operations are proposed to the client rather than executed.
-    agent_confirm_destructive: bool = True
+    # Destructive operations are always proposed to the client rather than executed.
+    # There is deliberately no setting that weakens this.
     # How long a proposed operation stays executable.
     agent_action_ttl_seconds: int = 900
 

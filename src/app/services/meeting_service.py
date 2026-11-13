@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..api.schemas import (
@@ -42,14 +43,30 @@ class MeetingService:
             raise NotFound(f"no meeting with id {meeting_id}")
         return meeting
 
+    async def lock(self, meeting_id: str) -> Meeting:
+        """Loads a meeting while holding its row, serialising PROCESS.
+
+        Two quick presses (or a client retry) must enqueue one job, not two. SQLite
+        ignores FOR UPDATE, but its single-writer model makes the same guarantee.
+        """
+        statement = select(Meeting).where(Meeting.id == meeting_id).with_for_update()
+        meeting = (await self._session.execute(statement)).scalar_one_or_none()
+        if meeting is None:
+            raise NotFound(f"no meeting with id {meeting_id}")
+        return meeting
+
     async def list(self, *, limit: int = 100, query: str | None = None) -> list[Meeting]:
-        statement = select(Meeting).order_by(Meeting.started_at.desc()).limit(limit)
-        meetings = list((await self._session.execute(statement)).scalars().all())
+        statement = select(Meeting)
         if query:
-            needle = query.lower()
-            meetings = [m for m in meetings
-                        if needle in m.title.lower() or needle in (m.summary or "").lower()]
-        return meetings
+            # Filter in SQL before LIMIT; filtering after it silently returned nothing
+            # when the newest rows did not match.
+            escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            statement = statement.where(
+                func.lower(Meeting.title).like(pattern, escape="\\")
+                | func.lower(Meeting.summary).like(pattern, escape="\\"))
+        statement = statement.order_by(Meeting.started_at.desc()).limit(max(1, limit))
+        return list((await self._session.execute(statement)).scalars().all())
 
     async def transcript(self, meeting_id: str) -> MeetingTranscript:
         statement = select(MeetingTranscript).where(MeetingTranscript.meeting_id == meeting_id)
@@ -69,12 +86,23 @@ class MeetingService:
 
     async def create(self, body: CreateMeetingBody) -> Meeting:
         meeting_id = body.id or str(uuid.uuid4())
+        if body.id:
+            try:
+                uuid.UUID(meeting_id)
+            except ValueError:
+                # The id becomes part of an object-storage key; only accept UUIDs.
+                raise Invalid("meeting id must be a UUID") from None
         existing = await self._session.get(Meeting, meeting_id)
         if existing is not None:
-            # Retried upload after a dropped connection: reuse the record.
+            # Retried upload after a dropped connection: reuse the record, and accept
+            # corrected metadata from the replay so a retry also fixes the clock.
             existing.title = body.title or existing.title
             if body.duration:
                 existing.duration = body.duration
+            if body.startedAt:
+                started = dates.parse(body.startedAt)
+                if started is not None:
+                    existing.started_at = started
             await self._session.flush()
             await self._session.refresh(existing)
             return existing
@@ -101,10 +129,21 @@ class MeetingService:
             raise Conflict("this meeting is already being processed")
 
         key = ObjectStorage.audio_key(meeting_id)
+        # Release the request's database connection while the body streams. A slow
+        # upload otherwise pins a pool slot for its whole duration, and five of them
+        # starve every other endpoint.
+        await self._session.commit()
         written = await self._storage.put(key, stream, content_type)
         if written == 0:
+            # Do not leave a zero-byte object behind: a retry would overwrite it, but
+            # a failed first upload should leave no trace at all.
+            try:
+                await self._storage.delete(key)
+            except Exception:  # noqa: BLE001
+                log.warning("could not remove empty upload for meeting %s", meeting_id)
             raise Invalid("the uploaded recording was empty")
 
+        meeting = await self.get(meeting_id)
         meeting.audio_key = key
         meeting.audio_bytes = written
         meeting.audio_content_type = content_type
@@ -167,24 +206,36 @@ class MeetingService:
 
         decided = {item.title.strip().lower(): item
                    for item in meeting.action_items if item.state != ActionItemState.suggested}
+        next_position = max((item.position for item in meeting.action_items), default=-1.0) + 1
         for item in list(meeting.action_items):
             if item.state == ActionItemState.suggested:
                 await self._session.delete(item)
 
         for index, raw in enumerate(analysis.get("actionItems") or []):
-            title = str((raw or {}).get("title") or "").strip()
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or "").strip()
             if not title:
                 continue
             if title.lower() in decided:
                 continue   # already accepted or dismissed by the user
+            assignee = raw.get("assignee")
+            try:
+                confidence = float(raw.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if not math.isfinite(confidence):
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, confidence))
+            due_raw = raw.get("dueDate")
             self._session.add(MeetingActionItem(
                 meeting_id=meeting_id,
                 title=title[:500],
-                assignee=(raw.get("assignee") or None),
-                due_date=dates.parse(raw.get("dueDate")),
-                confidence=float(raw.get("confidence") or 0.0),
+                assignee=(str(assignee)[:200] if assignee else None),
+                due_date=dates.parse(due_raw) if isinstance(due_raw, str) else None,
+                confidence=confidence,
                 state=ActionItemState.suggested,
-                position=index,
+                position=next_position + index,
             ))
 
         meeting.updated_at = utcnow()
@@ -206,7 +257,9 @@ class MeetingService:
         meeting = await self.get(meeting_id)
         key_prefix = ObjectStorage.meeting_prefix(meeting_id)
         await self._session.delete(meeting)
-        await self._session.flush()
+        # Commit before touching storage. A commit failure afterwards would otherwise
+        # leave a row pointing at audio that no longer exists.
+        await self._session.commit()
         # Storage last: a failure here leaves an orphan object, not a broken database.
         try:
             await self._storage.delete_prefix(key_prefix)
@@ -221,7 +274,11 @@ class MeetingService:
         try:
             await self._storage.delete(meeting.audio_key)
         except Exception:  # noqa: BLE001
-            log.warning("could not delete audio for meeting %s", meeting_id, exc_info=True)
+            # Keep the key: clearing it while the object still exists would leave an
+            # orphan that nothing can find again.
+            log.warning("could not delete audio for meeting %s; keeping its key",
+                        meeting_id, exc_info=True)
+            return
         meeting.audio_key = None
         await self._session.flush()
 

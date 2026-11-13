@@ -13,6 +13,18 @@ from ..config import Settings
 
 log = logging.getLogger(__name__)
 
+# A provider error can quote the model's response or a multi-line HTTP body. What
+# reaches meeting.error, the job row and the log must be one line and short.
+_ERROR_LIMIT = 200
+
+
+def sanitise_error(error: object, *, limit: int = _ERROR_LIMIT) -> str:
+    """One line, capped: enough to diagnose, never a transcript of the failure."""
+    text = " ".join(str(error).split())
+    if not text:
+        text = type(error).__name__
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
 
 class AnalysisService:
     """Transcript in, structured meeting intelligence out.
@@ -71,6 +83,7 @@ class AnalysisService:
 
 def _split(text: str, size: int) -> list[str]:
     """Splits on paragraph then sentence boundaries, so a chunk never ends mid-sentence."""
+    size = max(int(size), 1)   # a zero chunk size would loop forever
     if len(text) <= size:
         return [text]
     chunks: list[str] = []

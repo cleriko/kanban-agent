@@ -11,7 +11,7 @@ from ..config import Settings
 from ..db.models import MeetingStatus, ProcessingJob
 from ..infrastructure.queue import JobQueue
 from ..infrastructure.storage import ObjectStorage
-from ..services.analysis_service import AnalysisService
+from ..services.analysis_service import AnalysisService, sanitise_error
 from ..services.meeting_service import MeetingService
 
 log = logging.getLogger(__name__)
@@ -90,8 +90,12 @@ class MeetingProcessor:
                 transcript=transcript.text,
                 on_progress=analysis_progress)
         except ProviderError as exc:
-            # Keep the transcript; surface the analysis failure.
-            await meetings.set_status(meeting.id, MeetingStatus.failed, str(exc))
+            # Keep the transcript; surface the analysis failure. The message may
+            # quote the model, so only a short single line leaves the worker.
+            detail = sanitise_error(exc)
+            log.debug("analysis failed for meeting %s", meeting.id, exc_info=True)
+            log.warning("meeting %s analysis failed: %s", meeting.id, detail)
+            await meetings.set_status(meeting.id, MeetingStatus.failed, detail)
             await session.commit()
             raise
 

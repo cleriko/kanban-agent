@@ -11,6 +11,8 @@ It serves no HTTP. It claims jobs from Postgres, reads the recording from the
 object store the API wrote it to, transcribes it locally with Whisper, sends the
 *transcript* to the LLM for analysis, and writes the results back.
 
+The monorepo overview is [`../README.md`](../README.md).
+
 ```
 audio (object store) ──► faster-whisper ──► transcript ──► LLM ──► summary
                             (local)                      (Gemini)   decisions
@@ -31,11 +33,11 @@ needed; this repo builds the worker and nothing else.
   - `/var/lib/workconsole/models` → `/var/lib/workconsole/models`
     — Whisper weights, so they survive a redeploy
 
-Environment — the same as the API, except `WC_RUN_MIGRATIONS=false`:
+Environment — the same as the API, except `WC_RUN_MIGRATIONS=false` and no
+`WC_API_TOKEN` (this service serves no HTTP, so it has nothing to authenticate):
 
 ```env
 WC_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@PG_HOST:5432/DBNAME
-WC_API_TOKEN=same-token-as-the-api
 WC_GEMINI_API_KEY=your-google-ai-studio-key
 WC_LLM_PROVIDER=gemini
 WC_GEMINI_MODEL=gemini-2.5-flash
@@ -49,9 +51,21 @@ WC_RUN_MIGRATIONS=false
 WC_LOG_LEVEL=info
 ```
 
+`POSTGRES_PASSWORD` is required if you run a Compose file that creates Postgres;
+there is no built-in default.
+
 > **The shared volume is not optional.** The API writes the uploaded audio and
 > this service reads it. Different host paths means every job fails with a
 > missing file, while both containers look perfectly healthy.
+
+Authentication is enforced by the API, not here. Every API route except `/health`
+requires `Authorization: Bearer $WC_API_TOKEN`; if the token is unset the API
+returns **503** rather than serving requests. `WC_ALLOW_UNAUTHENTICATED=1` is an
+opt-out for a private tunnel or local tests on the API — this service never needs
+it, and this service never needs the token.
+
+The API also rejects audio that is not a recognised container (m4a/mp4, wav, mp3,
+ogg, webm) with **400**, so the agent only ever sees validated recordings.
 
 ## Verifying
 
@@ -59,7 +73,7 @@ There is no endpoint. Read the log — on boot it prints:
 
 ```
 worker <host>:<pid> ready · db=<host>:5432 · stt=faster_whisper · llm=gemini
-WC_* variables present: WC_API_TOKEN, WC_DATABASE_URL, ...
+WC_* variables present: WC_DATABASE_URL, ...
 ```
 
 `db=localhost:5432` means `WC_DATABASE_URL` did not reach the container, and it
@@ -84,6 +98,12 @@ Allow ~600 MB while transcribing; near zero idle. With a GPU set
 For a fully local stack, set `WC_LLM_PROVIDER=ollama` and `WC_OLLAMA_URL`, and
 run Ollama as its own service. Summaries hold up from a 0.5B model because
 decoding is schema-constrained; the agent needs 3B+ to be useful.
+
+## API
+
+None. This service exposes no routes. The HTTP contract, bearer auth and upload
+validation are owned by the API — see
+[kanban-worker](https://github.com/cleriko/kanban-worker#api).
 
 ## Jobs
 

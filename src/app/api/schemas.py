@@ -5,6 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# The client always sends UUIDs; constraining ids here rejects path-traversal values
+# before they can reach a storage key and keeps them inside the DB column width.
+_UUID = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+
 # These field names are the contract with the macOS app. See
 # Sources/Shared/Core/Networking/DTOs.swift for the other half.
 
@@ -44,9 +48,9 @@ class TaskDTO(BaseModel):
 class CreateTaskBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: str | None = None
-    title: str
-    notes: str | None = None
+    id: str | None = Field(default=None, pattern=_UUID)
+    title: str = Field(min_length=1, max_length=500)
+    notes: str | None = Field(default=None, max_length=100_000)
     status: str | None = None
     priority: str | None = None
     due: str | None = None
@@ -54,7 +58,8 @@ class CreateTaskBody(BaseModel):
     # Titles, or full objects when a client echoes a task back. Both are accepted so
     # an outbox replay never 422s on a shape difference.
     subtasks: list[str | dict[str, Any]] | None = None
-    position: float | None = None
+    # Infinity/NaN would poison the sparse ordering maths for every later insert.
+    position: float | None = Field(default=None, allow_inf_nan=False)
     source: str | None = None
     meetingId: str | None = None
     actionItemId: str | None = None
@@ -63,14 +68,14 @@ class CreateTaskBody(BaseModel):
 class PatchTaskBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    title: str | None = None
-    notes: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    notes: str | None = Field(default=None, max_length=100_000)
     status: str | None = None
     priority: str | None = None
     due: str | None = None
     tags: list[str] | None = None
     archived: bool | None = None
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class MoveBody(BaseModel):
@@ -78,7 +83,7 @@ class MoveBody(BaseModel):
 
     status: str
     index: int | None = None
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class SummaryDTO(BaseModel):
@@ -140,10 +145,10 @@ class MeetingDTO(BaseModel):
 class CreateMeetingBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: str | None = None
-    title: str
+    id: str | None = Field(default=None, pattern=_UUID)
+    title: str = Field(min_length=1, max_length=500)
     startedAt: str | None = None
-    duration: float = 0.0
+    duration: float = Field(default=0.0, ge=0)
 
 
 # --- Jobs -------------------------------------------------------------------
@@ -213,6 +218,9 @@ class HealthDTO(BaseModel):
     storage: str
     transcription: str
     llm: str
+    # False when WC_API_TOKEN is empty and unauthenticated mode is off: every route
+    # will 503 even though the database is fine. Defaults to True for old clients.
+    auth: bool = True
     # Present only when something is wrong, with a hint at the likely cause.
     detail: str | None = None
 

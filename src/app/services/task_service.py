@@ -14,6 +14,10 @@ from ..db.models import (
 from . import dates
 from .errors import Invalid, NotFound
 
+# Midpoint gaps below this are close enough to float resolution that two cards can
+# end up sharing a position; the column is renumbered instead.
+_MIN_POSITION_GAP = 1e-6
+
 _STATUS_ALIASES = {
     "inbox": TaskStatus.inbox, "in": TaskStatus.inbox,
     "todo": TaskStatus.todo, "to do": TaskStatus.todo, "to_do": TaskStatus.todo,
@@ -46,6 +50,13 @@ def parse_priority(value: str) -> TaskPriority:
     if priority is None:
         raise Invalid(f"unknown priority '{value}'")
     return priority
+
+
+def parse_source(value: str) -> TaskSource:
+    try:
+        return TaskSource(value.strip().lower())
+    except ValueError:
+        raise Invalid(f"unknown source '{value}'") from None
 
 
 def normalise_tags(tags: list[str]) -> list[str]:
@@ -97,13 +108,16 @@ class TaskService:
         if priority:
             statement = statement.where(Task.priority == parse_priority(priority))
         if source:
-            statement = statement.where(Task.source == TaskSource(source))
+            statement = statement.where(Task.source == parse_source(source))
         if meeting_id:
             statement = statement.where(Task.meeting_id == meeting_id)
         if query:
-            pattern = f"%{query.lower()}%"
+            # Escape LIKE metacharacters so a search for "100%" does not match everything.
+            escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
             statement = statement.where(
-                func.lower(Task.title).like(pattern) | func.lower(Task.notes).like(pattern))
+                func.lower(Task.title).like(pattern, escape="\\")
+                | func.lower(Task.notes).like(pattern, escape="\\"))
 
         statement = statement.order_by(Task.position, Task.created_at.desc())
         tasks = list((await self._session.execute(statement)).scalars().all())
@@ -115,8 +129,8 @@ class TaskService:
             tasks = [t for t in tasks if needle in [str(x).lower() for x in (t.tags or [])]]
         if due:
             tasks = [t for t in tasks if _matches_due(t, due)]
-        if limit:
-            tasks = tasks[:limit]
+        if limit is not None:
+            tasks = tasks[:max(0, limit)]
         return tasks
 
     async def summary(self) -> SummaryDTO:
@@ -207,8 +221,6 @@ class TaskService:
             task.priority = parse_priority(body.priority)
         if body.tags is not None:
             task.tags = normalise_tags(body.tags)
-        if body.position is not None:
-            task.position = body.position
         if body.due is not None:
             if dates.is_clear(body.due):
                 task.due_date = None
@@ -217,10 +229,15 @@ class TaskService:
                 if parsed is None:
                     raise Invalid(f"could not parse due '{body.due}'")
                 task.due_date = parsed
+        # Status first, then archive: _apply_status clears archived_at for a non-done
+        # column, which would otherwise undo an archive the same request asked for.
+        if body.status is not None:
+            await self._apply_status(task, parse_status(body.status), index=0,
+                                     position=body.position)
+        elif body.position is not None:
+            task.position = body.position
         if body.archived is not None:
             task.archived_at = utcnow() if body.archived else None
-        if body.status is not None:
-            await self._apply_status(task, parse_status(body.status), index=0)
 
         task.updated_at = utcnow()
         await self._session.flush()
@@ -256,19 +273,20 @@ class TaskService:
         await self._session.flush()
         return task
 
-    async def delete(self, task_id: str, *, hard: bool = False) -> Task:
+    async def delete(self, task_id: str, *, hard: bool = False) -> TaskDTO:
         task = await self.get(task_id)
         if not hard:
-            return await self.archive(task_id)
+            return to_dto(await self.archive(task_id))
 
+        # Build the response before the row disappears: serialising a deleted ORM
+        # instance afterwards is fragile, even while its attributes still load.
         snapshot = to_dto(task)
         # A deleted task releases its suggestion, so the meeting can offer it again.
         if task.action_item_id:
             await self._mark_action_item(task.action_item_id, ActionItemState.suggested, None)
         await self._session.delete(task)
         await self._session.flush()
-        task.id = snapshot.id
-        return task
+        return snapshot
 
     # --- Internals --------------------------------------------------------
 
@@ -288,12 +306,7 @@ class TaskService:
 
     async def _position_for(self, status: TaskStatus, index: int | None,
                             *, exclude: str | None = None) -> float:
-        statement = (select(Task.position)
-                     .where(Task.status == status, Task.archived_at.is_(None))
-                     .order_by(Task.position))
-        if exclude:
-            statement = statement.where(Task.id != exclude)
-        positions = list((await self._session.execute(statement)).scalars().all())
+        positions = await self._positions(status, exclude)
 
         if not positions:
             return 0.0
@@ -301,9 +314,37 @@ class TaskService:
             return positions[0] - 1
         if index >= len(positions):
             return positions[-1] + 1
+
+        low, high = positions[index - 1], positions[index]
+        if high - low < _MIN_POSITION_GAP:
+            # Repeated midpoint inserts eventually reach float resolution, at which
+            # point two cards share a position and their order becomes arbitrary.
+            # Renumber the column in place, then take the midpoint of the new gap.
+            await self._renormalise(status)
+            positions = await self._positions(status, exclude)
+            if index >= len(positions):
+                return positions[-1] + 1
+            low, high = positions[index - 1], positions[index]
         # Sparse doubles: inserting between two neighbours is one UPDATE, never a
         # renumbering of the column.
-        return (positions[index - 1] + positions[index]) / 2
+        return (low + high) / 2
+
+    async def _positions(self, status: TaskStatus, exclude: str | None = None) -> list[float]:
+        statement = (select(Task.position)
+                     .where(Task.status == status, Task.archived_at.is_(None))
+                     .order_by(Task.position, Task.created_at))
+        if exclude:
+            statement = statement.where(Task.id != exclude)
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def _renormalise(self, status: TaskStatus) -> None:
+        """Gives the column clean integer positions without changing its order."""
+        statement = (select(Task)
+                     .where(Task.status == status, Task.archived_at.is_(None))
+                     .order_by(Task.position, Task.created_at))
+        for position, task in enumerate((await self._session.execute(statement)).scalars().all()):
+            task.position = float(position)
+        await self._session.flush()
 
     async def _top_position(self, status: TaskStatus) -> float:
         return await self._position_for(status, 0)
@@ -353,7 +394,8 @@ def _matches_due(task: Task, window: str) -> bool:
         return _is_overdue(task, now)
     if window == "week":
         return due <= now.replace(hour=23, minute=59) + timedelta(days=7)
-    return True
+    # An unknown window must not silently match everything.
+    return False
 
 
 def to_dto(task: Task) -> TaskDTO:

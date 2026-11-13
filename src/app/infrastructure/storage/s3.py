@@ -75,19 +75,24 @@ class S3ObjectStorage(ObjectStorage):
         # streaming chunked signatures are not worth the complexity here.
         written = 0
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            digest = hashlib.sha256()
-            async for chunk in data:
-                tmp.write(chunk)
-                digest.update(chunk)
-                written += len(chunk)
-            payload_hash = digest.hexdigest()
             path = Path(tmp.name)
+            digest = hashlib.sha256()
+            try:
+                async for chunk in data:
+                    tmp.write(chunk)
+                    digest.update(chunk)
+                    written += len(chunk)
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+            payload_hash = digest.hexdigest()
 
         try:
             headers = self._sign("PUT", key, payload_hash, content_type)
             async with httpx.AsyncClient(timeout=600) as client:
                 with path.open("rb") as handle:
-                    response = await client.put(self._url(key), content=handle.read(), headers=headers)
+                    # Hand the file to httpx instead of reading 512 MB into RAM.
+                    response = await client.put(self._url(key), content=handle, headers=headers)
             response.raise_for_status()
         finally:
             path.unlink(missing_ok=True)
@@ -97,12 +102,17 @@ class S3ObjectStorage(ObjectStorage):
         headers = self._sign("GET", key, hashlib.sha256(b"").hexdigest())
         suffix = Path(key).suffix or ".bin"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            async with httpx.AsyncClient(timeout=600) as client:
-                async with client.stream("GET", self._url(key), headers=headers) as response:
-                    response.raise_for_status()
-                    async for chunk in response.aiter_bytes():
-                        tmp.write(chunk)
-            return tmp.name
+            path = Path(tmp.name)
+            try:
+                async with httpx.AsyncClient(timeout=600) as client:
+                    async with client.stream("GET", self._url(key), headers=headers) as response:
+                        response.raise_for_status()
+                        async for chunk in response.aiter_bytes():
+                            tmp.write(chunk)
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+            return str(path)
 
     async def delete(self, key: str) -> None:
         headers = self._sign("DELETE", key, hashlib.sha256(b"").hexdigest())

@@ -7,12 +7,17 @@ import signal
 import socket
 import sys
 
+from sqlalchemy import update
+
 from ..ai.gateway import get_gateway
 from ..config import get_settings
+from ..db.models import JobStatus, ProcessingJob, utcnow
 from ..db.session import create_all, dispose, session_scope
 from ..infrastructure import logging as log_config
 from ..infrastructure.queue import JobQueue
 from ..infrastructure.storage import get_storage
+from ..services.analysis_service import sanitise_error
+from ..services.errors import NotFound
 from .meeting_worker import MeetingProcessor
 
 
@@ -48,6 +53,11 @@ class Worker:
         if self._settings.is_sqlite:
             await create_all()
 
+        requeued = await self._requeue_own_jobs()
+        if requeued:
+            log.info("requeued %d job(s) this worker left running before the restart",
+                     requeued)
+
         log.info("worker %s ready · db=%s · stt=%s · llm=%s",
                  self._id, _host_of(self._settings.database_url),
                  self._settings.transcription_provider, self._settings.llm_provider)
@@ -64,7 +74,13 @@ class Worker:
 
         try:
             while not self._stopping.is_set():
-                claimed = await self._tick()
+                try:
+                    claimed = await self._tick()
+                except Exception:  # noqa: BLE001
+                    # A database blip, a pool timeout or a failure in the failure
+                    # handler must not kill the process and strand the current job.
+                    log.exception("worker tick failed; retrying after a short pause")
+                    claimed = False
                 if not claimed:
                     # Nothing to do: sleep rather than spin. This is why an idle
                     # worker costs effectively nothing.
@@ -88,23 +104,59 @@ class Worker:
 
         # Run in a fresh transaction so a long job never holds the claim's row lock.
         async with session_scope() as session:
-            from ..db.models import ProcessingJob
             job = await session.get(ProcessingJob, job_id)
             if job is None:
                 return True
+            timeout = self._settings.job_timeout_seconds
             try:
                 if kind == "process_meeting":
-                    await self._processor.run(session, job)
+                    try:
+                        await asyncio.wait_for(self._processor.run(session, job),
+                                               timeout=timeout)
+                    except asyncio.TimeoutError:
+                        # wait_for has already cancelled the processor and awaited its
+                        # cleanup; surface a retryable message instead of an empty one.
+                        raise TimeoutError(
+                            f"job exceeded its {timeout:g}s timeout and was cancelled"
+                        ) from None
                 else:
                     raise ValueError(f"unknown job kind '{kind}'")
-                await self._queue.complete(session, job_id)
+                await self._queue.complete(session, job_id, self._id)
                 log.info("job %s completed", job_id)
             except Exception as exc:  # noqa: BLE001
-                log.exception("job %s failed", job_id)
-                # Model and network failures are worth another attempt; bad data is not.
-                retry = not isinstance(exc, (ValueError, FileNotFoundError))
-                await self._queue.fail(session, job_id, str(exc), retry=retry)
+                # Provider messages can quote model output; the full traceback goes to
+                # debug and only a short single line reaches the log and the job row.
+                detail = sanitise_error(exc)
+                log.debug("job %s failed", job_id, exc_info=True)
+                log.error("job %s failed: %s", job_id, detail)
+                # The failed statement may have aborted the transaction; roll back so
+                # recording the failure runs on a clean connection.
+                await session.rollback()
+                # Model and network failures are worth another attempt; bad data or a
+                # deleted meeting is not.
+                retry = not isinstance(exc, (ValueError, FileNotFoundError, NotFound))
+                try:
+                    await self._queue.fail(session, job_id, detail, retry=retry,
+                                           worker_id=self._id)
+                except Exception:  # noqa: BLE001
+                    log.exception("could not record failure for job %s", job_id)
+                    await session.rollback()
         return True
+
+    async def _requeue_own_jobs(self) -> int:
+        """Takes back jobs left running by this same worker id.
+
+        A redeploy reuses the container name, so waiting out the lease (~30 min)
+        would idle work that no other worker will touch until it expires.
+        """
+        async with session_scope() as session:
+            result = await session.execute(
+                update(ProcessingJob)
+                .where(ProcessingJob.status == JobStatus.running,
+                       ProcessingJob.locked_by == self._id)
+                .values(status=JobStatus.queued, stage="queued", progress=0.0,
+                        locked_at=None, locked_by=None, updated_at=utcnow()))
+            return int(result.rowcount or 0)
 
 
 def main() -> int:
